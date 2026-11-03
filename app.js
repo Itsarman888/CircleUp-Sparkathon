@@ -43,6 +43,7 @@
     $("authGate").classList.add("hidden");
     $("appArea").classList.remove("hidden");
     $("signedInAs").textContent = user?.email || "";
+    setupChatUI();
   }
 
   function showSignedOutUI() {
@@ -245,6 +246,180 @@
     $("wants").value = profile.wants.join(", ");
     $("format").value = profile.format;
   }
+  // CIRCLEUP CHAT FEATURE
+
+let activeChat = null;
+let chatChannel = null;
+
+function setupChatUI() {
+  if (!document.getElementById("chats")) {
+    const appArea = document.getElementById("appArea");
+
+    const chatSection = document.createElement("section");
+    chatSection.id = "chats";
+    chatSection.className = "view";
+
+    chatSection.innerHTML = `
+      <h1>My Chats</h1>
+      <p class="muted">Message students after an exchange is accepted.</p>
+      <div class="layout">
+        <div class="panel">
+          <h2>Conversations</h2>
+          <div id="chatList">Loading conversations...</div>
+        </div>
+        <div class="panel">
+          <h2 id="chatTitle">Select a conversation</h2>
+          <div id="chatMessages"
+               style="height:300px;overflow-y:auto;padding:10px">
+          </div>
+          <form id="chatForm" class="hidden">
+            <textarea id="chatInput"
+              placeholder="Write a message..."
+              maxlength="2000"
+              required></textarea>
+            <button class="btn" type="submit">Send</button>
+          </form>
+        </div>
+      </div>
+    `;
+
+    appArea.appendChild(chatSection);
+  }
+
+  let nav = document.getElementById("circleupChatNav");
+
+  if (!nav) {
+    nav = document.createElement("button");
+    nav.id = "circleupChatNav";
+    nav.className = "btn secondary";
+    nav.textContent = "Chats";
+    nav.dataset.go = "chats";
+
+    const signOut = document.getElementById("signOut");
+    signOut.parentElement.insertBefore(nav, signOut);
+  }
+
+  document.getElementById("chatForm").addEventListener("submit", sendChatMessage);
+  loadChatList();
+}
+
+async function loadChatList() {
+  const list = document.getElementById("chatList");
+  if (!list || !user) return;
+
+  const accepted = requests.filter(r =>
+    ["accepted", "completed"].includes(r.status)
+  );
+
+  if (!accepted.length) {
+    list.textContent = "No accepted exchanges yet.";
+    return;
+  }
+
+  list.innerHTML = "";
+
+  accepted.forEach(r => {
+    const person = people.find(p => p.id === r.personId);
+    const name = person?.name || "CircleUp student";
+
+    const button = document.createElement("button");
+    button.className = "btn secondary";
+    button.style.cssText = "display:block;width:100%;margin:8px 0;text-align:left";
+    button.textContent = name + " — " + r.topic;
+    button.addEventListener("click", () => openChat(r, name));
+
+    list.appendChild(button);
+  });
+}
+
+async function openChat(exchange, name) {
+  activeChat = exchange;
+
+  document.getElementById("chatTitle").textContent =
+    "Chat with " + name;
+
+  document.getElementById("chatForm").classList.remove("hidden");
+
+  if (chatChannel) {
+    await db.removeChannel(chatChannel);
+    chatChannel = null;
+  }
+
+  await loadChatMessages();
+
+  chatChannel = db.channel("circleup-chat-" + exchange.id)
+    .on(
+      "postgres_changes",
+      {
+        event: "INSERT",
+        schema: "public",
+        table: "messages",
+        filter: "exchange_id=eq." + exchange.id
+      },
+      loadChatMessages
+    )
+    .subscribe();
+}
+
+async function loadChatMessages() {
+  if (!activeChat) return;
+
+  const box = document.getElementById("chatMessages");
+
+  const { data, error } = await db
+    .from("messages")
+    .select("*")
+    .eq("exchange_id", activeChat.id)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    box.textContent = "Could not load messages: " + error.message;
+    return;
+  }
+
+  box.innerHTML = (data || []).map(m => `
+    <div style="
+      background:${m.sender_id === user.id ? "#eeebff" : "#f1f1f5"};
+      padding:10px;
+      margin:8px 0;
+      border-radius:10px;
+      max-width:85%;
+      margin-left:${m.sender_id === user.id ? "auto" : "0"};
+      overflow-wrap:anywhere">
+      <div>${esc(m.content)}</div>
+      <small class="muted">
+        ${new Date(m.created_at).toLocaleString()}
+      </small>
+    </div>
+  `).join("");
+
+  box.scrollTop = box.scrollHeight;
+}
+
+async function sendChatMessage(event) {
+  event.preventDefault();
+
+  if (!activeChat || !user) return;
+
+  const input = document.getElementById("chatInput");
+  const content = input.value.trim();
+
+  if (!content) return;
+
+  const { error } = await db.from("messages").insert({
+    exchange_id: activeChat.id,
+    sender_id: user.id,
+    content
+  });
+
+  if (error) {
+    toast("Message failed: " + error.message);
+    return;
+  }
+
+  input.value = "";
+  await loadChatMessages();
+}
   function renderRequests() {
     const list = requests.filter(r => tab === "all" || r.status === tab);
     ["all","pending","accepted","completed"].forEach(s => {
@@ -261,7 +436,11 @@
         : r.direction === "sent" && r.status === "pending"
           ? `<button class="btn secondary" data-action="cancel" data-id="${esc(r.id)}">Cancel request</button>`
           : r.status === "accepted"
-            ? `<button class="btn" data-action="complete" data-id="${esc(r.id)}">Mark completed</button>` : "";
+  ? `<button class="btn" data-chat-id="${esc(r.id)}">Open Chat</button>
+     <button class="btn secondary" data-action="complete" data-id="${esc(r.id)}">Mark completed</button>`
+  : r.status === "completed"
+    ? `<button class="btn" data-chat-id="${esc(r.id)}">Open Chat</button>`
+    : "";
       const statusLabel = ({pending:"Awaiting response",accepted:"Exchange accepted",completed:"Completed",declined:"Declined",cancelled:"Cancelled"})[r.status] || r.status;
       const directionLabel = r.direction === "sent" ? "You sent this request" : "You received this request";
       return `<article class="card request">${personAvatar(other)}<main><h3>Skill exchange with ${esc(other.name)}</h3><p class="muted">${esc(directionLabel)}<br><b>Learn:</b> ${esc(r.topic)} · <b>Share:</b> ${esc(r.offer)}<br>Format: ${esc(r.format)}${r.message ? `<br>${esc(r.message)}` : ""}</p><span class="status ${esc(r.status)}">${esc(statusLabel)}</span><div class="actions">${actions}</div></main></article>`;
@@ -269,11 +448,21 @@
   }
 
   function navigate(id) {
-    document.querySelectorAll(".view").forEach(v => v.classList.toggle("active", v.id === id));
-    if (id === "profile") { fillForm(); profilePreview(); }
-    if (id === "exchanges") renderRequests();
-    window.scrollTo({ top: 0, behavior: "smooth" });
+  document.querySelectorAll(".view").forEach(v =>
+    v.classList.toggle("active", v.id === id)
+  );
+
+  if (id === "profile") {
+    fillForm();
+    profilePreview();
   }
+
+  if (id === "exchanges") renderRequests();
+
+  if (id === "chats") loadChatList();
+
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
 
   function openRequest(id) {
     current = people.find(p => p.id === id);
@@ -386,6 +575,16 @@
   document.addEventListener("click", async e => {
     const go = e.target.closest("[data-go]");
     if (go) { navigate(go.dataset.go); return; }
+    const chatButton = e.target.closest("[data-chat-id]");
+if (chatButton) {
+  const exchange = requests.find(r => r.id === chatButton.dataset.chatId);
+  if (exchange) {
+    const other = people.find(p => p.id === exchange.personId);
+    navigate("chats");
+    openChat(exchange, other?.name || "CircleUp student");
+  }
+  return;
+}
     const connect = e.target.closest("[data-connect]");
     if (connect) { openRequest(connect.dataset.connect); return; }
     const t = e.target.closest("[data-tab]");
