@@ -27,7 +27,6 @@
   const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   let user = null, profile = null, people = [], requests = [], tab = "all", current = null;
   let skillCatalog = [];
-  let activeChat = null, chatChannel = null;
 
   function setAuthMode(mode) {
     const signup = mode === "signup";
@@ -43,34 +42,7 @@
   function showSignedInUI() {
     $("authGate").classList.add("hidden");
     $("appArea").classList.remove("hidden");
-    ensureChatUI();
     $("signedInAs").textContent = user?.email || "";
-  }
-
-  function ensureChatUI() {
-    if ($("chatView")) return;
-    const nav = document.createElement("div");
-    nav.id = "circleNav";
-    nav.style.cssText = "display:flex;gap:8px;flex-wrap:wrap;margin:0 0 18px";
-    nav.innerHTML = '<button class="btn secondary" data-go="discover">Discover</button><button class="btn secondary" data-go="exchanges">Exchanges</button><button class="btn secondary" data-go="chats">Chats</button><button class="btn secondary" data-go="profile">Profile</button>';
-    const signoutRow = $("signOut").parentElement;
-    signoutRow.insertAdjacentElement("afterend", nav);
-    const section = document.createElement("section");
-    section.id = "chatView"; section.className = "view";
-    section.innerHTML = `
-      <div class="eyebrow">YOUR ACCEPTED CONNECTIONS</div><h1>Messages<span>.</span></h1>
-      <p class="muted">Private conversations are available after an exchange request is accepted.</p>
-      <div class="layout" style="align-items:start;grid-template-columns:minmax(220px, .8fr) minmax(0, 1.5fr)">
-        <div class="panel"><h2>Your chats</h2><div id="chatList"></div></div>
-        <div class="panel" style="min-height:420px;display:flex;flex-direction:column">
-          <div id="chatHeading"><h2>Select a conversation</h2><p class="muted">Choose an accepted exchange to start messaging.</p></div>
-          <div id="chatMessages" role="log" aria-live="polite" style="flex:1;min-height:220px;max-height:420px;overflow:auto;padding:12px 0"></div>
-          <form id="chatForm" style="display:flex;gap:8px;margin-top:12px"><input id="chatInput" class="input" maxlength="2000" placeholder="Write a message…" required style="flex:1" disabled><button class="btn" id="chatSend" type="submit" disabled>Send</button></form>
-          <p class="muted" style="font-size:12px;margin-top:8px">Keep personal contact details private and be respectful.</p>
-        </div>
-      </div>`;
-    $("appArea").appendChild(section);
-    $("chatForm").addEventListener("submit", sendChatMessage);
   }
 
   function showSignedOutUI() {
@@ -289,80 +261,17 @@
         : r.direction === "sent" && r.status === "pending"
           ? `<button class="btn secondary" data-action="cancel" data-id="${esc(r.id)}">Cancel request</button>`
           : r.status === "accepted"
-            ? `<button class="btn" data-chat="${esc(r.id)}">Open chat</button><button class="btn secondary" data-action="complete" data-id="${esc(r.id)}">Mark completed</button>` : "";
+            ? `<button class="btn" data-action="complete" data-id="${esc(r.id)}">Mark completed</button>` : "";
       const statusLabel = ({pending:"Awaiting response",accepted:"Exchange accepted",completed:"Completed",declined:"Declined",cancelled:"Cancelled"})[r.status] || r.status;
       const directionLabel = r.direction === "sent" ? "You sent this request" : "You received this request";
       return `<article class="card request">${personAvatar(other)}<main><h3>Skill exchange with ${esc(other.name)}</h3><p class="muted">${esc(directionLabel)}<br><b>Learn:</b> ${esc(r.topic)} · <b>Share:</b> ${esc(r.offer)}<br>Format: ${esc(r.format)}${r.message ? `<br>${esc(r.message)}` : ""}</p><span class="status ${esc(r.status)}">${esc(statusLabel)}</span><div class="actions">${actions}</div></main></article>`;
     }).join("");
-    if ($("chatList")) renderChatList();
-  }
-
-  async function openChat(exchangeId) {
-    const r = requests.find(x => x.id === exchangeId && ["accepted", "completed"].includes(x.status));
-    if (!r) { toast("Chat is available only for accepted exchanges."); return; }
-    activeChat = r;
-    if (chatChannel) { await db.removeChannel(chatChannel); chatChannel = null; }
-    navigate("chats");
-    const other = people.find(p => p.id === r.personId) || { name: "CircleUp student" };
-    $("chatHeading").innerHTML = `<h2>${esc(other.name)}</h2><p class="muted">Skill exchange: ${esc(r.topic)} · ${esc(r.offer)}</p>`;
-    $("chatInput").disabled = false; $("chatSend").disabled = false;
-    await loadChatMessages();
-    chatChannel = db.channel("messages-" + exchangeId)
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages", filter: "exchange_id=eq." + exchangeId }, payload => {
-        if (payload.new) appendChatMessage(payload.new);
-      }).subscribe();
-    renderChatList();
-  }
-
-  function renderChatList() {
-    const accepted = requests.filter(r => ["accepted", "completed"].includes(r.status));
-    $("chatList").innerHTML = accepted.length ? accepted.map(r => {
-      const other = people.find(p => p.id === r.personId) || { name: "CircleUp student" };
-      return `<button class="btn secondary" data-chat="${esc(r.id)}" style="display:block;width:100%;text-align:left;margin:8px 0">${esc(other.name)}<small style="display:block;opacity:.7">${esc(r.topic)}</small></button>`;
-    }).join("") : '<p class="muted">No accepted exchanges yet. Accept or receive an accepted request to unlock chats.</p>';
-  }
-
-  function appendChatMessage(m) {
-    if (!activeChat || m.exchange_id !== activeChat.id) return;
-    if ($("chatMessages").querySelector(`[data-message-id="${m.id}"]`)) return;
-    const mine = m.sender_id === user.id;
-    const item = document.createElement("div");
-    item.dataset.messageId = m.id;
-    item.style.cssText = `max-width:82%;margin:10px ${mine ? "0 0 10px auto" : "10px auto 10px 0"};padding:10px 12px;border-radius:12px;background:${mine ? "#e5f4ed" : "#f0f2f5"};color:#17231d;overflow-wrap:anywhere`;
-    const time = new Date(m.created_at).toLocaleString();
-    item.innerHTML = `<div>${esc(m.content)}</div><small style="opacity:.65">${mine ? "You" : "Student"} · ${esc(time)}</small>`;
-    $("chatMessages").appendChild(item);
-    $("chatMessages").scrollTop = $("chatMessages").scrollHeight;
-  }
-
-  async function loadChatMessages() {
-    $("chatMessages").innerHTML = '<p class="muted">Loading messages…</p>';
-    const { data, error } = await db.from("messages").select("id,exchange_id,sender_id,content,created_at")
-      .eq("exchange_id", activeChat.id).order("created_at", { ascending: true }).limit(200);
-    if (error) { $("chatMessages").textContent = error.message; return; }
-    $("chatMessages").innerHTML = "";
-    (data || []).forEach(appendChatMessage);
-    if (!data?.length) $("chatMessages").innerHTML = '<p class="muted">No messages yet. Say hello and plan your first skill-exchange session.</p>';
-  }
-
-  async function sendChatMessage(e) {
-    e.preventDefault();
-    if (!activeChat) return;
-    const content = $("chatInput").value.trim();
-    if (!content) return;
-    $("chatSend").disabled = true;
-    const { data, error } = await db.from("messages").insert({ exchange_id: activeChat.id, sender_id: user.id, content }).select("id,exchange_id,sender_id,content,created_at").single();
-    $("chatSend").disabled = false;
-    if (error) { toast(error.message || "Message could not be sent."); return; }
-    $("chatInput").value = "";
-    appendChatMessage(data);
   }
 
   function navigate(id) {
     document.querySelectorAll(".view").forEach(v => v.classList.toggle("active", v.id === id));
     if (id === "profile") { fillForm(); profilePreview(); }
     if (id === "exchanges") renderRequests();
-    if (id === "chats") renderChatList();
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -439,8 +348,6 @@
   });
 
   $("signOut").addEventListener("click", async () => {
-    if (chatChannel) { await db.removeChannel(chatChannel); chatChannel = null; }
-    activeChat = null;
     const { error } = await db.auth.signOut();
     if (error) return toast(error.message);
     showSignedOutUI();
@@ -487,8 +394,6 @@
       document.querySelectorAll("[data-tab]").forEach(x => x.classList.toggle("active", x === t));
       renderRequests(); return;
     }
-    const chat = e.target.closest("[data-chat]");
-    if (chat) { try { await openChat(chat.dataset.chat); } catch (err) { toast(err.message || "Could not open chat."); } return; }
     const action = e.target.closest("[data-action]");
     if (action) {
       try { await updateRequest(action.dataset.id, action.dataset.action); }
